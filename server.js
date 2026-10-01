@@ -1,5 +1,5 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { createClient } = require('@libsql/client');
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const path = require('path');
@@ -8,6 +8,12 @@ const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Turso Cloud Database კავშირი
+const db = createClient({
+    url: process.env.TURSO_DATABASE_URL || 'file:local.db',
+    authToken: process.env.TURSO_AUTH_TOKEN || '',
+});
 
 const uploadDir = path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -32,160 +38,170 @@ app.use(session({
     cookie: { secure: false }
 }));
 
-const db = new sqlite3.Database('./database.sqlite', (err) => {
-    if (err) console.error('ბაზის შეცდომა:', err.message);
-    else console.log('ბაზა წარმატებით მუშაობს!');
-});
+// ცხრილების შექმნა და საწყისი მონაცემების (Seed Data) ჩაყრა
+async function initDB() {
+    try {
+        await db.execute(`CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            email TEXT UNIQUE,
+            phone TEXT UNIQUE,
+            password TEXT,
+            role TEXT DEFAULT 'user'
+        )`);
 
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        email TEXT UNIQUE,
-        phone TEXT UNIQUE,
-        password TEXT,
-        role TEXT DEFAULT 'user'
-    )`);
+        await db.execute(`CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            price REAL,
+            category TEXT,
+            image TEXT,
+            description TEXT,
+            stock INTEGER DEFAULT 10
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        price REAL,
-        category TEXT,
-        image TEXT,
-        description TEXT,
-        stock INTEGER DEFAULT 10
-    )`);
+        await db.execute(`CREATE TABLE IF NOT EXISTS product_variants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            productId INTEGER,
+            variantName TEXT,
+            priceAdjustment REAL DEFAULT 0,
+            stock INTEGER DEFAULT 10,
+            FOREIGN KEY(productId) REFERENCES products(id) ON DELETE CASCADE
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS product_variants (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        productId INTEGER,
-        variantName TEXT,
-        priceAdjustment REAL DEFAULT 0,
-        stock INTEGER DEFAULT 10,
-        FOREIGN KEY(productId) REFERENCES products(id) ON DELETE CASCADE
-    )`);
+        await db.execute(`CREATE TABLE IF NOT EXISTS coupons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE,
+            discountPercent INTEGER,
+            active INTEGER DEFAULT 1
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS coupons (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        code TEXT UNIQUE,
-        discountPercent INTEGER,
-        active INTEGER DEFAULT 1
-    )`);
+        await db.execute(`CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            userId INTEGER,
+            name TEXT,
+            phone TEXT,
+            address TEXT,
+            items TEXT,
+            subtotal REAL,
+            discount REAL DEFAULT 0,
+            total REAL,
+            couponCode TEXT,
+            status TEXT DEFAULT 'მუშავდება',
+            date TEXT
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        userId INTEGER,
-        name TEXT,
-        phone TEXT,
-        address TEXT,
-        items TEXT,
-        subtotal REAL,
-        discount REAL DEFAULT 0,
-        total REAL,
-        couponCode TEXT,
-        status TEXT DEFAULT 'მუშავდება',
-        date TEXT
-    )`);
+        await db.execute(`CREATE TABLE IF NOT EXISTS wishlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            userId INTEGER,
+            productId INTEGER
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS wishlist (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        userId INTEGER,
-        productId INTEGER
-    )`);
+        await db.execute(`CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            productId INTEGER,
+            userId INTEGER,
+            username TEXT,
+            rating INTEGER,
+            comment TEXT,
+            date TEXT
+        )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        productId INTEGER,
-        userId INTEGER,
-        username TEXT,
-        rating INTEGER,
-        comment TEXT,
-        date TEXT
-    )`, () => {
-        // საწყისი პროდუქტების ჩაყრა თუ ბაზა ცარიელია
-        db.get("SELECT COUNT(*) as count FROM products", [], (err, row) => {
-            if (row && row.count === 0) {
-                console.log('ბაზა ცარიელია — ვამატებთ საწყის პროდუქტებს...');
-                
-                const initialProducts = [
-                    {
-                        title: 'მანდალის ფორმის კედლის საათი',
-                        price: 120,
-                        category: 'საათები',
-                        image: 'https://images.unsplash.com/photo-1563861826100-9cb868fdbe1c?auto=format&fit=crop&q=80&w=600',
-                        description: 'ხელნაკეთი, ლაზერით გამოჭრილი ეგზოტიკური მანდალის დიზაინის კედლის საათი.',
-                        variants: [{ name: 'საშუალო (40სმ)', price: 0, stock: 5 }, { name: 'დიდი (60სმ)', price: 40, stock: 3 }]
-                    },
-                    {
-                        title: 'რომანტიკული ღამის სანათი',
-                        price: 85,
-                        category: 'სანათები',
-                        image: 'https://images.unsplash.com/photo-1513506003901-1e6a229e2d15?auto=format&fit=crop&q=80&w=600',
-                        description: 'თბილი განათების მქონე ხის დიზაინერული სანათი საძინებლისთვის.',
-                        variants: [{ name: 'თბილი შუქი', price: 0, stock: 10 }, { name: 'RGB ფერადი', price: 15, stock: 7 }]
-                    },
-                    {
-                        title: 'ფანერის ელეგანტური სასაჩუქრე ყუთი',
-                        price: 45,
-                        category: 'ყუთები',
-                        image: 'https://images.unsplash.com/photo-1513201099705-a9746e1e201f?auto=format&fit=crop&q=80&w=600',
-                        description: 'უნივერსალური სასაჩუქრე ყუთი გრავირების შესაძლებლობით.',
-                        variants: [{ name: 'სტანდარტული', price: 0, stock: 15 }]
-                    },
-                    {
-                        title: 'გულის ფორმის ფოტოჩარჩო',
-                        price: 60,
-                        category: 'აქსესუარები',
-                        image: 'https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?auto=format&fit=crop&q=80&w=600',
-                        description: 'ორიგინალური ხის ფოტოჩარჩო თქვენი საყვარელი მომენტებისთვის.',
-                        variants: [{ name: 'კლასიკური', price: 0, stock: 8 }]
-                    }
-                ];
+        const prodCount = await db.execute("SELECT COUNT(*) as count FROM products");
+        if (prodCount.rows[0].count === 0) {
+            console.log('ბაზა ცარიელია — ვამატებთ საწყის პროდუქტებს...');
+            
+            const initialProducts = [
+                {
+                    title: 'მანდალის ფორმის კედლის საათი',
+                    price: 120,
+                    category: 'საათები',
+                    image: 'https://images.unsplash.com/photo-1563861826100-9cb868fdbe1c?auto=format&fit=crop&q=80&w=600',
+                    description: 'ხელნაკეთი, ლაზერით გამოჭრილი ეგზოტიკური მანდალის დიზაინის კედლის საათი.',
+                    variants: [{ name: 'საშუალო (40სმ)', price: 0, stock: 5 }, { name: 'დიდი (60სმ)', price: 40, stock: 3 }]
+                },
+                {
+                    title: 'რომანტიკული ღამის სანათი',
+                    price: 85,
+                    category: 'სანათები',
+                    image: 'https://images.unsplash.com/photo-1513506003901-1e6a229e2d15?auto=format&fit=crop&q=80&w=600',
+                    description: 'თბილი განათების მქონე ხის დიზაინერული სანათი საძინებლისთვის.',
+                    variants: [{ name: 'თბილი შუქი', price: 0, stock: 10 }, { name: 'RGB ფერადი', price: 15, stock: 7 }]
+                },
+                {
+                    title: 'ფანერის ელეგანტური სასაჩუქრე ყუთი',
+                    price: 45,
+                    category: 'ყუთები',
+                    image: 'https://images.unsplash.com/photo-1513201099705-a9746e1e201f?auto=format&fit=crop&q=80&w=600',
+                    description: 'უნივერსალური სასაჩუქრე ყუთი გრავირების შესაძლებლობით.',
+                    variants: [{ name: 'სტანდარტული', price: 0, stock: 15 }]
+                },
+                {
+                    title: 'გულის ფორმის ფოტოჩარჩო',
+                    price: 60,
+                    category: 'აქსესუარები',
+                    image: 'https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?auto=format&fit=crop&q=80&w=600',
+                    description: 'ორიგინალური ხის ფოტოჩარჩო თქვენი საყვარელი მომენტებისთვის.',
+                    variants: [{ name: 'კლასიკური', price: 0, stock: 8 }]
+                }
+            ];
 
-                initialProducts.forEach(p => {
-                    db.run(`INSERT INTO products (title, price, category, image, description, stock) VALUES (?, ?, ?, ?, ?, ?)`,
-                        [p.title, p.price, p.category, p.image, p.description, 10], function(err) {
-                            if (!err && p.variants) {
-                                const prodId = this.lastID;
-                                p.variants.forEach(v => {
-                                    db.run(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
-                                        [prodId, v.name, v.price, v.stock]);
-                                });
-                            }
-                        }
-                    );
+            for (const p of initialProducts) {
+                const res = await db.execute({
+                    sql: `INSERT INTO products (title, price, category, image, description, stock) VALUES (?, ?, ?, ?, ?, ?)`,
+                    args: [p.title, p.price, p.category, p.image, p.description, 10]
                 });
+                const prodId = Number(res.lastInsertRowid);
 
-                db.run(`INSERT OR IGNORE INTO coupons (code, discountPercent) VALUES ('WOOD2026', 15)`);
-                console.log('საწყისი პროდუქტები წარმატებით ჩაიტვირთა!');
+                if (p.variants) {
+                    for (const v of p.variants) {
+                        await db.execute({
+                            sql: `INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
+                            args: [prodId, v.name, v.price, v.stock]
+                        });
+                    }
+                }
             }
-        });
-    });
-});
 
-app.get('/api/products', (req, res) => {
-    db.all(`SELECT products.*, 
+            await db.execute({
+                sql: `INSERT OR IGNORE INTO coupons (code, discountPercent) VALUES (?, ?)`,
+                args: ['WOOD2026', 15]
+            });
+            console.log('საწყისი პროდუქტები წარმატებით ჩაიტვირთა Turso-ში!');
+        }
+        console.log('Turso ბაზა წარმატებით მუშაობს!');
+    } catch (err) {
+        console.error('ბაზის ინიციალიზაციის შეცდომა:', err);
+    }
+}
+initDB();
+
+// API: პროდუქტები
+app.get('/api/products', async (req, res) => {
+    try {
+        const prodResult = await db.execute(`
+            SELECT products.*, 
             COALESCE(AVG(reviews.rating), 0) as avgRating, 
             COUNT(reviews.id) as reviewCount
             FROM products 
             LEFT JOIN reviews ON products.id = reviews.productId
-            GROUP BY products.id`, [], (err, products) => {
-        if (err) return res.status(500).json({ error: err.message });
+            GROUP BY products.id
+        `);
 
-        db.all(`SELECT * FROM product_variants`, [], (err, variants) => {
-            if (err) return res.status(500).json({ error: err.message });
+        const varResult = await db.execute(`SELECT * FROM product_variants`);
 
-            const result = products.map(p => ({
-                ...p,
-                variants: variants.filter(v => v.productId === p.id)
-            }));
-            res.json(result);
-        });
-    });
+        const result = prodResult.rows.map(p => ({
+            ...p,
+            variants: varResult.rows.filter(v => v.productId === p.id)
+        }));
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/products', upload.single('imageFile'), (req, res) => {
+// API: პროდუქტის დამატება
+app.post('/api/products', upload.single('imageFile'), async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') {
         return res.status(403).json({ error: 'არ გაქვთ ადმინის უფლება' });
     }
@@ -193,28 +209,32 @@ app.post('/api/products', upload.single('imageFile'), (req, res) => {
     const { title, price, category, description, stock, variants } = req.body;
     let imageUrl = req.file ? `/uploads/${req.file.filename}` : 'https://via.placeholder.com/400';
 
-    db.run(`INSERT INTO products (title, price, category, image, description, stock) VALUES (?, ?, ?, ?, ?, ?)`,
-        [title, parseFloat(price), category, imageUrl, description, parseInt(stock) || 10],
-        function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            const prodId = this.lastID;
+    try {
+        const insertRes = await db.execute({
+            sql: `INSERT INTO products (title, price, category, image, description, stock) VALUES (?, ?, ?, ?, ?, ?)`,
+            args: [title, parseFloat(price), category, imageUrl, description, parseInt(stock) || 10]
+        });
+        const prodId = Number(insertRes.lastInsertRowid);
 
-            if (variants) {
-                try {
-                    const parsedVariants = JSON.parse(variants);
-                    const stmt = db.prepare(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`);
-                    parsedVariants.forEach(v => {
-                        stmt.run(prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10);
+        if (variants) {
+            try {
+                const parsedVariants = JSON.parse(variants);
+                for (const v of parsedVariants) {
+                    await db.execute({
+                        sql: `INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
+                        args: [prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10]
                     });
-                    stmt.finalize();
-                } catch(e) {}
-            }
-            res.json({ success: true, id: prodId });
+                }
+            } catch (e) {}
         }
-    );
+        res.json({ success: true, id: prodId });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.put('/api/products/:id', upload.single('imageFile'), (req, res) => {
+// API: პროდუქტის რედაქტირება
+app.put('/api/products/:id', upload.single('imageFile'), async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') {
         return res.status(403).json({ error: 'არ გაქვთ ადმინის უფლება' });
     }
@@ -222,196 +242,235 @@ app.put('/api/products/:id', upload.single('imageFile'), (req, res) => {
     const prodId = req.params.id;
     const { title, price, category, description, stock, variants } = req.body;
 
-    const updateQuery = req.file 
-        ? `UPDATE products SET title = ?, price = ?, category = ?, image = ?, description = ?, stock = ? WHERE id = ?`
-        : `UPDATE products SET title = ?, price = ?, category = ?, description = ?, stock = ? WHERE id = ?`;
-    
-    const params = req.file 
-        ? [title, parseFloat(price), category, `/uploads/${req.file.filename}`, description, parseInt(stock), prodId]
-        : [title, parseFloat(price), category, description, parseInt(stock), prodId];
+    try {
+        if (req.file) {
+            await db.execute({
+                sql: `UPDATE products SET title = ?, price = ?, category = ?, image = ?, description = ?, stock = ? WHERE id = ?`,
+                args: [title, parseFloat(price), category, `/uploads/${req.file.filename}`, description, parseInt(stock), prodId]
+            });
+        } else {
+            await db.execute({
+                sql: `UPDATE products SET title = ?, price = ?, category = ?, description = ?, stock = ? WHERE id = ?`,
+                args: [title, parseFloat(price), category, description, parseInt(stock), prodId]
+            });
+        }
 
-    db.run(updateQuery, params, function(err) {
-        if (err) return res.status(500).json({ error: err.message });
+        await db.execute({ sql: `DELETE FROM product_variants WHERE productId = ?`, args: [prodId] });
 
-        db.run(`DELETE FROM product_variants WHERE productId = ?`, [prodId], () => {
-            if (variants) {
-                try {
-                    const parsedVariants = JSON.parse(variants);
-                    const stmt = db.prepare(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`);
-                    parsedVariants.forEach(v => {
-                        stmt.run(prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10);
+        if (variants) {
+            try {
+                const parsedVariants = JSON.parse(variants);
+                for (const v of parsedVariants) {
+                    await db.execute({
+                        sql: `INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
+                        args: [prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10]
                     });
-                    stmt.finalize();
-                } catch(e) {}
-            }
-            res.json({ success: true });
-        });
-    });
+                }
+            } catch (e) {}
+        }
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.delete('/api/products/:id', (req, res) => {
+// API: პროდუქტის წაშლა
+app.delete('/api/products/:id', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') {
         return res.status(403).json({ error: 'უფლება არ გაქვთ' });
     }
-    db.run("DELETE FROM products WHERE id = ?", [req.params.id], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        db.run("DELETE FROM wishlist WHERE productId = ?", [req.params.id]);
-        db.run("DELETE FROM reviews WHERE productId = ?", [req.params.id]);
-        db.run("DELETE FROM product_variants WHERE productId = ?", [req.params.id]);
+    try {
+        const id = req.params.id;
+        await db.execute({ sql: "DELETE FROM products WHERE id = ?", args: [id] });
+        await db.execute({ sql: "DELETE FROM wishlist WHERE productId = ?", args: [id] });
+        await db.execute({ sql: "DELETE FROM reviews WHERE productId = ?", args: [id] });
+        await db.execute({ sql: "DELETE FROM product_variants WHERE productId = ?", args: [id] });
         res.json({ success: true });
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/admin/coupons', (req, res) => {
+// კუპონები
+app.get('/api/admin/coupons', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') return res.status(403).json({ error: 'უფლება არ გაქვთ' });
-    db.all("SELECT * FROM coupons", [], (err, rows) => res.json(rows));
+    const r = await db.execute("SELECT * FROM coupons");
+    res.json(r.rows);
 });
 
-app.post('/api/admin/coupons', (req, res) => {
+app.post('/api/admin/coupons', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') return res.status(403).json({ error: 'უფლება არ გაქვთ' });
     const { code, discountPercent } = req.body;
-    db.run("INSERT INTO coupons (code, discountPercent) VALUES (?, ?)", [code.toUpperCase(), parseInt(discountPercent)], function(err) {
-        if (err) return res.status(400).json({ error: 'კოდი უკვე არსებობს ან არასწორია' });
+    try {
+        await db.execute({
+            sql: "INSERT INTO coupons (code, discountPercent) VALUES (?, ?)",
+            args: [code.toUpperCase(), parseInt(discountPercent)]
+        });
         res.json({ success: true });
-    });
+    } catch (err) {
+        res.status(400).json({ error: 'კოდი უკვე არსებობს ან არასწორია' });
+    }
 });
 
-app.delete('/api/admin/coupons/:id', (req, res) => {
+app.delete('/api/admin/coupons/:id', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') return res.status(403).json({ error: 'უფლება არ გაქვთ' });
-    db.run("DELETE FROM coupons WHERE id = ?", [req.params.id], () => res.json({ success: true }));
+    await db.execute({ sql: "DELETE FROM coupons WHERE id = ?", args: [req.params.id] });
+    res.json({ success: true });
 });
 
-app.post('/api/apply-coupon', (req, res) => {
+app.post('/api/apply-coupon', async (req, res) => {
     const { code } = req.body;
-    db.get("SELECT * FROM coupons WHERE code = ? AND active = 1", [code ? code.toUpperCase() : ''], (err, coupon) => {
-        if (!coupon) return res.status(400).json({ error: 'არასწორი ან გაუქმებული პრომო-კოდი!' });
-        res.json({ success: true, discountPercent: coupon.discountPercent, code: coupon.code });
+    const r = await db.execute({
+        sql: "SELECT * FROM coupons WHERE code = ? AND active = 1",
+        args: [code ? code.toUpperCase() : '']
     });
+    if (r.rows.length === 0) return res.status(400).json({ error: 'არასწორი ან გაუქმებული პრომო-კოდი!' });
+    res.json({ success: true, discountPercent: r.rows[0].discountPercent, code: r.rows[0].code });
 });
 
-app.get('/api/wishlist', (req, res) => {
+// ფავორიტები
+app.get('/api/wishlist', async (req, res) => {
     if (!req.session.user) return res.status(401).json({ error: 'გაიარეთ ავტორიზაცია' });
-    db.all("SELECT productId FROM wishlist WHERE userId = ?", [req.session.user.id], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows.map(r => r.productId));
-    });
+    const r = await db.execute({ sql: "SELECT productId FROM wishlist WHERE userId = ?", args: [req.session.user.id] });
+    res.json(r.rows.map(r => r.productId));
 });
 
-app.post('/api/wishlist', (req, res) => {
+app.post('/api/wishlist', async (req, res) => {
     if (!req.session.user) return res.status(401).json({ error: 'გაიარეთ ავტორიზაცია' });
     const { productId } = req.body;
-    db.get("SELECT * FROM wishlist WHERE userId = ? AND productId = ?", [req.session.user.id, productId], (err, row) => {
-        if (row) {
-            db.run("DELETE FROM wishlist WHERE userId = ? AND productId = ?", [req.session.user.id, productId], () => {
-                res.json({ status: 'removed' });
-            });
-        } else {
-            db.run("INSERT INTO wishlist (userId, productId) VALUES (?, ?)", [req.session.user.id, productId], () => {
-                res.json({ status: 'added' });
-            });
-        }
+    const check = await db.execute({
+        sql: "SELECT * FROM wishlist WHERE userId = ? AND productId = ?",
+        args: [req.session.user.id, productId]
     });
+    if (check.rows.length > 0) {
+        await db.execute({
+            sql: "DELETE FROM wishlist WHERE userId = ? AND productId = ?",
+            args: [req.session.user.id, productId]
+        });
+        res.json({ status: 'removed' });
+    } else {
+        await db.execute({
+            sql: "INSERT INTO wishlist (userId, productId) VALUES (?, ?)",
+            args: [req.session.user.id, productId]
+        });
+        res.json({ status: 'added' });
+    }
 });
 
-app.get('/api/reviews/:productId', (req, res) => {
-    db.all("SELECT * FROM reviews WHERE productId = ? ORDER BY id DESC", [req.params.productId], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
+// მიმოხილვები
+app.get('/api/reviews/:productId', async (req, res) => {
+    const r = await db.execute({
+        sql: "SELECT * FROM reviews WHERE productId = ? ORDER BY id DESC",
+        args: [req.params.productId]
     });
+    res.json(r.rows);
 });
 
-app.post('/api/reviews', (req, res) => {
+app.post('/api/reviews', async (req, res) => {
     if (!req.session.user) return res.status(401).json({ error: 'გაიარეთ ავტორიზაცია' });
     const { productId, rating, comment } = req.body;
     const date = new Date().toLocaleDateString();
-    db.run("INSERT INTO reviews (productId, userId, username, rating, comment, date) VALUES (?, ?, ?, ?, ?, ?)",
-        [productId, req.session.user.id, req.session.user.username, parseInt(rating), comment, date],
-        function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true });
-        }
-    );
+    await db.execute({
+        sql: "INSERT INTO reviews (productId, userId, username, rating, comment, date) VALUES (?, ?, ?, ?, ?, ?)",
+        args: [productId, req.session.user.id, req.session.user.username, parseInt(rating), comment, date]
+    });
+    res.json({ success: true });
 });
 
-app.post('/api/orders', (req, res) => {
+// შეკვეთები
+app.post('/api/orders', async (req, res) => {
     const { name, phone, address, items, subtotal, discount, total, couponCode } = req.body;
     const userId = req.session.user ? req.session.user.id : null;
     const date = new Date().toLocaleString();
 
-    db.run(`INSERT INTO orders (userId, name, phone, address, items, subtotal, discount, total, couponCode, status, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'მუშავდება', ?)`,
-        [userId, name, phone, address, JSON.stringify(items), parseFloat(subtotal), parseFloat(discount) || 0, parseFloat(total), couponCode || '', date],
-        function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true, id: this.lastID });
-        }
-    );
+    const r = await db.execute({
+        sql: `INSERT INTO orders (userId, name, phone, address, items, subtotal, discount, total, couponCode, status, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'მუშავდება', ?)`,
+        args: [userId, name, phone, address, JSON.stringify(items), parseFloat(subtotal), parseFloat(discount) || 0, parseFloat(total), couponCode || '', date]
+    });
+    res.json({ success: true, id: Number(r.lastInsertRowid) });
 });
 
-app.get('/api/orders', (req, res) => {
+app.get('/api/orders', async (req, res) => {
     if (!req.session.user) return res.status(401).json({ error: 'გაიარეთ ავტორიზაცია' });
     if (req.session.user.role === 'admin') {
-        db.all("SELECT * FROM orders ORDER BY id DESC", [], (err, rows) => res.json(rows));
+        const r = await db.execute("SELECT * FROM orders ORDER BY id DESC");
+        res.json(r.rows);
     } else {
-        db.all("SELECT * FROM orders WHERE userId = ? ORDER BY id DESC", [req.session.user.id], (err, rows) => res.json(rows));
+        const r = await db.execute({ sql: "SELECT * FROM orders WHERE userId = ? ORDER BY id DESC", args: [req.session.user.id] });
+        res.json(r.rows);
     }
 });
 
-app.put('/api/orders/:id/status', (req, res) => {
+app.put('/api/orders/:id/status', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') return res.status(403).json({ error: 'უფლება არ გაქვთ' });
-    db.run("UPDATE orders SET status = ? WHERE id = ?", [req.body.status, req.params.id], () => res.json({ success: true }));
+    await db.execute({
+        sql: "UPDATE orders SET status = ? WHERE id = ?",
+        args: [req.body.status, req.params.id]
+    });
+    res.json({ success: true });
 });
 
-app.get('/api/admin/stats', (req, res) => {
+app.get('/api/admin/stats', async (req, res) => {
     if (!req.session.user || req.session.user.role !== 'admin') return res.status(403).json({ error: 'უფლება არ გაქვთ' });
-    db.get("SELECT COUNT(*) as totalOrders, SUM(total) as totalRevenue FROM orders", [], (err, orderStats) => {
-        db.get("SELECT COUNT(*) as totalProducts FROM products", [], (err2, prodStats) => {
-            res.json({
-                totalOrders: orderStats.totalOrders || 0,
-                totalRevenue: orderStats.totalRevenue || 0,
-                totalProducts: prodStats.totalProducts || 0
-            });
-        });
+    const orderStats = await db.execute("SELECT COUNT(*) as totalOrders, SUM(total) as totalRevenue FROM orders");
+    const prodStats = await db.execute("SELECT COUNT(*) as totalProducts FROM products");
+    res.json({
+        totalOrders: orderStats.rows[0].totalOrders || 0,
+        totalRevenue: orderStats.rows[0].totalRevenue || 0,
+        totalProducts: prodStats.rows[0].totalProducts || 0
     });
 });
 
+// რეგისტრაცია და ავტორიზაცია
 app.post('/api/register', async (req, res) => {
     const { username, email, phone, password } = req.body;
     if (!username || !email || !phone || !password) return res.status(400).json({ error: 'გთხოვთ შეავსოთ ყველა ველი!' });
     if (password.length < 6) return res.status(400).json({ error: 'პაროლი უნდა იყოს მინიმუმ 6 სიმბოლოიანი!' });
 
-    db.get("SELECT * FROM users WHERE username = ? OR email = ? OR phone = ?", [username, email, phone], async (err, existingUser) => {
-        if (existingUser) {
-            if (existingUser.username === username) return res.status(400).json({ error: 'მომხმარებლის სახელი დაკავებულია!' });
-            if (existingUser.email === email) return res.status(400).json({ error: 'ეს ელ-ფოსტა უკვე გამოყენებულია!' });
-            if (existingUser.phone === phone) return res.status(400).json({ error: 'ეს ტელეფონის ნომერი უკვე გამოყენებულია!' });
-        }
-
-        try {
-            const hashedPassword = await bcrypt.hash(password, 10);
-            db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
-                const role = (row.count === 0) ? 'admin' : 'user';
-                db.run("INSERT INTO users (username, email, phone, password, role) VALUES (?, ?, ?, ?, ?)", 
-                    [username, email, phone, hashedPassword, role], (err) => {
-                    if (err) return res.status(500).json({ error: 'ბაზის შეცდომა' });
-                    res.json({ success: true });
-                });
-            });
-        } catch { res.status(500).json({ error: 'სერვერის შეცდომა' }); }
+    const existing = await db.execute({
+        sql: "SELECT * FROM users WHERE username = ? OR email = ? OR phone = ?",
+        args: [username, email, phone]
     });
+
+    if (existing.rows.length > 0) {
+        const u = existing.rows[0];
+        if (u.username === username) return res.status(400).json({ error: 'მომხმარებლის სახელი დაკავებულია!' });
+        if (u.email === email) return res.status(400).json({ error: 'ეს ელ-ფოსტა უკვე გამოყენებულია!' });
+        if (u.phone === phone) return res.status(400).json({ error: 'ეს ტელეფონის ნომერი უკვე გამოყენებულია!' });
+    }
+
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const userCount = await db.execute("SELECT COUNT(*) as count FROM users");
+        const role = (userCount.rows[0].count === 0) ? 'admin' : 'user';
+
+        await db.execute({
+            sql: "INSERT INTO users (username, email, phone, password, role) VALUES (?, ?, ?, ?, ?)",
+            args: [username, email, phone, hashedPassword, role]
+        });
+        res.json({ success: true });
+    } catch {
+        res.status(500).json({ error: 'სერვერის შეცდომა' });
+    }
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-    db.get("SELECT * FROM users WHERE username = ? OR email = ?", [username, username], async (err, user) => {
-        if (err || !user) return res.status(400).json({ error: 'არასწორი მონაცემები' });
-        const match = await bcrypt.compare(password, user.password);
-        if (match) {
-            req.session.user = { id: user.id, username: user.username, role: user.role };
-            res.json({ success: true, user: req.session.user });
-        } else {
-            res.status(400).json({ error: 'არასწორი მონაცემები' });
-        }
+    const r = await db.execute({
+        sql: "SELECT * FROM users WHERE username = ? OR email = ?",
+        args: [username, username]
     });
+
+    if (r.rows.length === 0) return res.status(400).json({ error: 'არასწორი მონაცემები' });
+    const user = r.rows[0];
+
+    const match = await bcrypt.compare(password, user.password);
+    if (match) {
+        req.session.user = { id: user.id, username: user.username, role: user.role };
+        res.json({ success: true, user: req.session.user });
+    } else {
+        res.status(400).json({ error: 'არასწორი მონაცემები' });
+    }
 });
 
 app.get('/api/check-auth', (req, res) => {
