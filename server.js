@@ -107,8 +107,7 @@ db.serialize(() => {
         productId INTEGER,
         variantName TEXT,
         priceAdjustment REAL DEFAULT 0,
-        stock INTEGER DEFAULT 10,
-        FOREIGN KEY(productId) REFERENCES products(id) ON DELETE CASCADE
+        stock INTEGER DEFAULT 10
     )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS coupons (
@@ -149,7 +148,7 @@ db.serialize(() => {
         date TEXT
     )`, () => {
         db.get("SELECT COUNT(*) as count FROM products", [], (err, row) => {
-            if (row && row.count === 0) {
+            if (err || (row && row.count === 0)) {
                 console.log('ბაზა ცარიელია — ვამატებთ საწყის პროდუქტებს...');
                 
                 const initialProducts = [
@@ -158,51 +157,28 @@ db.serialize(() => {
                         price: 120,
                         category: 'საათები',
                         image: 'https://images.unsplash.com/photo-1563861826100-9cb868fdbe1c?auto=format&fit=crop&q=80&w=600',
-                        description: 'ხელნაკეთი, ლაზერით გამოჭრილი ეგზოტიკური მანდალის დიზაინის კედლის საათი.',
-                        variants: [{ name: 'საშუალო (40სმ)', price: 0, stock: 5 }, { name: 'დიდი (60სმ)', price: 40, stock: 3 }]
+                        description: 'ხელნაკეთი, ლაზერით გამოჭრილი ეგზოტიკური მანდალის დიზაინის კედლის საათი.'
                     },
                     {
                         title: 'რომანტიკული ღამის სანათი',
                         price: 85,
                         category: 'სანათები',
                         image: 'https://images.unsplash.com/photo-1513506003901-1e6a229e2d15?auto=format&fit=crop&q=80&w=600',
-                        description: 'თბილი განათების მქონე ხის დიზაინერული სანათი საძინებლისთვის.',
-                        variants: [{ name: 'თბილი შუქი', price: 0, stock: 10 }, { name: 'RGB ფერადი', price: 15, stock: 7 }]
+                        description: 'თბილი განათების მქონე ხის დიზაინერული სანათი საძინებლისთვის.'
                     },
                     {
                         title: 'ფანერის ელეგანტური სასაჩუქრე ყუთი',
                         price: 45,
                         category: 'ყუთები',
                         image: 'https://images.unsplash.com/photo-1513201099705-a9746e1e201f?auto=format&fit=crop&q=80&w=600',
-                        description: 'უნივერსალური სასაჩუქრე ყუთი გრავირების შესაძლებლობით.',
-                        variants: [{ name: 'სტანდარტული', price: 0, stock: 15 }]
-                    },
-                    {
-                        title: 'გულის ფორმის ფოტოჩარჩო',
-                        price: 60,
-                        category: 'აქსესუარები',
-                        image: 'https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?auto=format&fit=crop&q=80&w=600',
-                        description: 'ორიგინალური ხის ფოტოჩარჩო თქვენი საყვარელი მომენტებისთვის.',
-                        variants: [{ name: 'კლასიკური', price: 0, stock: 8 }]
+                        description: 'უნივერსალური სასაჩუქრე ყუთი გრავირების შესაძლებლობით.'
                     }
                 ];
 
                 initialProducts.forEach(p => {
                     db.run(`INSERT INTO products (title, price, category, image, description, stock) VALUES (?, ?, ?, ?, ?, ?)`,
-                        [p.title, p.price, p.category, p.image, p.description, 10], function(err) {
-                            if (!err && p.variants && this.lastID) {
-                                const prodId = this.lastID;
-                                p.variants.forEach(v => {
-                                    db.run(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
-                                        [prodId, v.name, v.price, v.stock]);
-                                });
-                            }
-                        }
-                    );
+                        [p.title, p.price, p.category, p.image, p.description, 10]);
                 });
-
-                db.run(`INSERT OR IGNORE INTO coupons (code, discountPercent) VALUES ('WOOD2026', 15)`);
-                console.log('საწყისი პროდუქტები წარმატებით ჩაიტვირთა!');
             }
         });
     });
@@ -270,8 +246,8 @@ app.put('/api/products/:id', upload.single('imageFile'), (req, res) => {
         : `UPDATE products SET title = ?, price = ?, category = ?, description = ?, stock = ? WHERE id = ?`;
     
     const params = req.file 
-        ? [title, parseFloat(price), category, req.file.path, description, parseInt(stock), prodId]
-        : [title, parseFloat(price), category, description, parseInt(stock), prodId];
+        ? [title, parseFloat(price), category, req.file.path, description, parseInt(stock) || 10, prodId]
+        : [title, parseFloat(price), category, description, parseInt(stock) || 10, prodId];
 
     db.run(updateQuery, params, function(err) {
         if (err) return res.status(500).json({ error: err.message });
