@@ -1,23 +1,22 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const path = require('path');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const { createClient } = require('@libsql/client');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Cloudinary-ს კონფიგურაცია შენი მონაცემებით
+// Cloudinary-ს კონფიგურაცია
 cloudinary.config({
     cloud_name: 'pxont47o',
     api_key: '5DKxyOlQIvL-86xNon0tPBIP53A',
     api_secret: '338364727367931'
 });
 
-// ფაილების პირდაპირ Cloudinary-ში ასატვირთი სთორეჯი
 const storage = new CloudinaryStorage({
     cloudinary: cloudinary,
     params: {
@@ -37,11 +36,52 @@ app.use(session({
     cookie: { secure: false }
 }));
 
-const db = new sqlite3.Database('./database.sqlite', (err) => {
-    if (err) console.error('ბაზის შეცდომა:', err.message);
-    else console.log('ბაზა წარმატებით მუშაობს!');
+// Turso კლიენტის დაკავშირება შენი მონაცემებით
+const libsql = createClient({
+    url: process.env.TURSO_DATABASE_URL || 'libsql://lumo-koreasos523-ops.aws-us-west-2.turso.io',
+    authToken: process.env.TURSO_AUTH_TOKEN || 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTExOTYzNTQsImlkIjoiMDFhMGY3Y2QtN2YwMS03ZTdkLTlhZTAtMzIyMjRiN2UyNzE1Iiwia2lkIjoiNUwyYWNMWTZUWUNXSllkYWpUZ09PTUJrZVMzSXRIZWozeGlZeXk1T2pqayIsInJpZCI6IjM0NjRjZWJkLTFhZjAtNDdhNy04NTYyLWMzYjQ3NGRmNDMyZiJ9.q0dP2IRrFYXBVvOeL1mEbLF-4boeRXyZKLMg-hmgau0GCJlWWPvsjBJzCY0IMffJsJKvJ7MzDUzKY-G2PxgMCQ'
 });
 
+// SQLite-ის მსგავსი თავსებადობის ხიდი Turso-სთვის
+const db = {
+    all: async (sql, params, cb) => {
+        try {
+            const rs = await libsql.execute({ sql, args: params || [] });
+            cb(null, rs.rows);
+        } catch (e) { cb(e); }
+    },
+    get: async (sql, params, cb) => {
+        try {
+            const rs = await libsql.execute({ sql, args: params || [] });
+            cb(null, rs.rows[0]);
+        } catch (e) { cb(e); }
+    },
+    run: async function(sql, params, cb) {
+        try {
+            const rs = await libsql.execute({ sql, args: params || [] });
+            const context = { lastID: Number(rs.lastInsertRowid || 0), changes: rs.rowsAffected };
+            if (typeof cb === 'function') cb.call(context, null);
+        } catch (e) { 
+            if (typeof cb === 'function') cb(e); 
+        }
+    },
+    serialize: (fn) => { fn(); },
+    prepare: (sql) => {
+        return {
+            run: async (...args) => {
+                let cb = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+                let params = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+                try {
+                    await libsql.execute({ sql, args: params });
+                    if (cb) cb(null);
+                } catch (e) { if (cb) cb(e); }
+            },
+            finalize: () => {}
+        };
+    }
+};
+
+// ცხრილების შექმნა და საწყისი პროდუქტების ჩატვირთვა
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,7 +190,7 @@ db.serialize(() => {
                 initialProducts.forEach(p => {
                     db.run(`INSERT INTO products (title, price, category, image, description, stock) VALUES (?, ?, ?, ?, ?, ?)`,
                         [p.title, p.price, p.category, p.image, p.description, 10], function(err) {
-                            if (!err && p.variants) {
+                            if (!err && p.variants && this.lastID) {
                                 const prodId = this.lastID;
                                 p.variants.forEach(v => {
                                     db.run(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
@@ -195,7 +235,6 @@ app.post('/api/products', upload.single('imageFile'), (req, res) => {
     }
 
     const { title, price, category, description, stock, variants } = req.body;
-    // req.file.path ახლა აბრუნებს Cloudinary-ს მუდმივ ლინკს!
     let imageUrl = req.file ? req.file.path : 'https://via.placeholder.com/400';
 
     db.run(`INSERT INTO products (title, price, category, image, description, stock) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -207,11 +246,10 @@ app.post('/api/products', upload.single('imageFile'), (req, res) => {
             if (variants) {
                 try {
                     const parsedVariants = JSON.parse(variants);
-                    const stmt = db.prepare(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`);
                     parsedVariants.forEach(v => {
-                        stmt.run(prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10);
+                        db.run(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
+                            [prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10]);
                     });
-                    stmt.finalize();
                 } catch(e) {}
             }
             res.json({ success: true, id: prodId });
@@ -242,11 +280,10 @@ app.put('/api/products/:id', upload.single('imageFile'), (req, res) => {
             if (variants) {
                 try {
                     const parsedVariants = JSON.parse(variants);
-                    const stmt = db.prepare(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`);
                     parsedVariants.forEach(v => {
-                        stmt.run(prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10);
+                        db.run(`INSERT INTO product_variants (productId, variantName, priceAdjustment, stock) VALUES (?, ?, ?, ?)`,
+                            [prodId, v.name, parseFloat(v.priceAdjustment) || 0, parseInt(v.stock) || 10]);
                     });
-                    stmt.finalize();
                 } catch(e) {}
             }
             res.json({ success: true });
@@ -371,9 +408,9 @@ app.get('/api/admin/stats', (req, res) => {
     db.get("SELECT COUNT(*) as totalOrders, SUM(total) as totalRevenue FROM orders", [], (err, orderStats) => {
         db.get("SELECT COUNT(*) as totalProducts FROM products", [], (err2, prodStats) => {
             res.json({
-                totalOrders: orderStats.totalOrders || 0,
-                totalRevenue: orderStats.totalRevenue || 0,
-                totalProducts: prodStats.totalProducts || 0
+                totalOrders: orderStats?.totalOrders || 0,
+                totalRevenue: orderStats?.totalRevenue || 0,
+                totalProducts: prodStats?.totalProducts || 0
             });
         });
     });
@@ -394,7 +431,7 @@ app.post('/api/register', async (req, res) => {
         try {
             const hashedPassword = await bcrypt.hash(password, 10);
             db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
-                const role = (row.count === 0) ? 'admin' : 'user';
+                const role = ((row?.count || 0) === 0) ? 'admin' : 'user';
                 db.run("INSERT INTO users (username, email, phone, password, role) VALUES (?, ?, ?, ?, ?)", 
                     [username, email, phone, hashedPassword, role], (err) => {
                     if (err) return res.status(500).json({ error: 'ბაზის შეცდომა' });
